@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#e8e2d7" />
+  <title>Magazine — Reader</title>
+  <style>
+    /* Editorial palette and a deliberately quiet, book-like interface. */
+    :root {
+      --ink: #26231f;
+      --muted: #746e64;
+      --paper: #fffdf8;
+      --paper-edge: #eee9df;
+      --ui: rgba(255, 253, 248, .78);
+      --line: rgba(48, 43, 36, .12);
+      --shadow: 0 24px 64px rgba(44, 34, 22, .22), 0 5px 16px rgba(44, 34, 22, .12);
+      --ease-book: cubic-bezier(.22, .78, .22, 1);
+      --page-ratio: .707;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      overflow: hidden;
+      color: var(--ink);
+      font-family: ui-rounded, "SF Pro Rounded", "Helvetica Neue", Arial, sans-serif;
+      background:
+        radial-gradient(75rem 45rem at 12% 5%, rgba(255,255,255,.88), transparent 60%),
+        radial-gradient(60rem 38rem at 94% 100%, rgba(207,194,172,.38), transparent 65%),
+        linear-gradient(130deg, #eeeae2 0%, #e7e1d6 53%, #dcd3c4 100%);
+    }
+
+    button { font: inherit; }
+    .reader { position: relative; isolation: isolate; width: 100%; height: 100%; }
+    .viewer {
+      display: grid;
+      place-items: center;
+      width: 100%; height: 100%;
+      overflow: auto;
+      overscroll-behavior: contain;
+      padding: clamp(3.5rem, 7vw, 6.5rem) 1.25rem 5.7rem;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: pan-y pinch-zoom;
+    }
+    .book-scaler {
+      display: grid;
+      place-items: center;
+      transform-origin: center;
+      transition: transform 360ms var(--ease-book);
+      will-change: transform;
+    }
+    .book-scaler.is-zoomed { transform: scale(1.32); }
+
+    /* Two half-pages form the book. The leaf is overlaid only while turning. */
+    .book-stage {
+      --book-w: min(90vw, 1160px, calc((100vh - 9.3rem) * 1.414));
+      position: relative;
+      width: var(--book-w);
+      aspect-ratio: 1.414 / 1;
+      min-width: 300px;
+      perspective: 2200px;
+      transform-style: preserve-3d;
+      user-select: none;
+    }
+    .book-stage::before {
+      content: "";
+      position: absolute;
+      inset: 3.5% 4.5% -3.5%;
+      z-index: -2;
+      border-radius: 1.2rem;
+      background: rgba(52, 42, 28, .23);
+      filter: blur(22px);
+      transform: translateY(8px);
+    }
+    .book-stage::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      border-radius: 5px;
+      background: #d8d1c6;
+      box-shadow: inset 0 0 0 1px rgba(59,49,38,.13), var(--shadow);
+    }
+    .page-slot, .flip-leaf { height: 100%; width: 50%; position: absolute; top: 0; }
+    .page-slot {
+      overflow: hidden;
+      background: var(--paper);
+      box-shadow: inset 0 0 0 1px rgba(69,57,43,.11);
+    }
+    .page-left { left: 0; border-radius: 5px 0 0 5px; }
+    .page-right { left: 50%; border-radius: 0 5px 5px 0; }
+    .page-left::after, .page-right::after, .leaf-face::after {
+      content: "";
+      position: absolute;
+      z-index: 2;
+      inset: 0;
+      pointer-events: none;
+    }
+    .page-left::after { background: linear-gradient(90deg, rgba(35,23,12,.035), transparent 9%, transparent 79%, rgba(35,23,12,.15)); }
+    .page-right::after { background: linear-gradient(90deg, rgba(35,23,12,.16), transparent 21%, transparent 90%, rgba(35,23,12,.025)); }
+    .page-surface { position: absolute; inset: 0; background: var(--paper); }
+    .page-surface canvas { display: block; width: 100%; height: 100%; object-fit: fill; }
+    .page-surface.is-empty { background: transparent; }
+    .book-spine {
+      position: absolute;
+      z-index: 8;
+      top: .2%; bottom: .2%; left: 50%; width: 4px;
+      transform: translateX(-50%);
+      background: linear-gradient(90deg, rgba(31,22,13,.25), rgba(255,255,255,.55) 48%, rgba(32,23,15,.22));
+      box-shadow: 0 0 10px rgba(22, 17, 11, .34);
+      pointer-events: none;
+    }
+    .book-stage.is-cover .page-left { background: linear-gradient(110deg, #d8d0c3, #e4ddd2); }
+    .book-stage.is-cover .page-left .page-surface { display: none; }
+
+    .flip-leaf {
+      z-index: 12;
+      left: 50%;
+      display: none;
+      transform-origin: left center;
+      transform-style: preserve-3d;
+      border-radius: 0 5px 5px 0;
+      will-change: transform;
+    }
+    .flip-leaf.is-active { display: block; }
+    /* Starting position for a page turning backwards (it begins on the left). */
+    .flip-leaf.is-on-left { transform: rotateY(-180deg); }
+    .flip-leaf.is-turning { transition: transform 690ms var(--ease-book); }
+    .flip-leaf.turn-forward { transform: rotateY(-180deg); }
+    .flip-leaf.turn-back { transform: rotateY(0deg); }
+    .leaf-face {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background: var(--paper);
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+      box-shadow: 3px 0 12px rgba(25, 18, 10, .12);
+    }
+    .leaf-front { border-radius: 0 5px 5px 0; }
+    .leaf-back { transform: rotateY(180deg); border-radius: 5px 0 0 5px; }
+    .leaf-front::after { background: linear-gradient(90deg, rgba(35,23,12,.2), transparent 20%, transparent 77%, rgba(35,23,12,.045)); }
+    .leaf-back::after { background: linear-gradient(90deg, rgba(35,23,12,.04), transparent 22%, transparent 80%, rgba(35,23,12,.2)); }
+
+    /* In single-page mode the same right slot becomes a full, animated page. */
+    .book-stage.is-single {
+      --book-w: min(86vw, 660px, calc((100vh - 9rem) * var(--page-ratio)));
+      aspect-ratio: var(--page-ratio) / 1;
+      perspective: none;
+    }
+    .book-stage.is-single::after { box-shadow: var(--shadow); }
+    .book-stage.is-single .page-left, .book-stage.is-single .book-spine { display: none; }
+    .book-stage.is-single .page-right { left: 0; width: 100%; border-radius: 5px; }
+    .book-stage.is-single .page-right::after { background: linear-gradient(90deg, rgba(35,23,12,.07), transparent 10%, transparent 92%, rgba(35,23,12,.045)); }
+    .book-stage.is-single .flip-leaf { display: none !important; }
+    /* Deliberately pronounced mobile paging: this stays smooth but is visible on small screens. */
+    .page-surface.slide-out-next { animation: exitNext 240ms ease-in both; }
+    .page-surface.slide-out-prev { animation: exitPrev 240ms ease-in both; }
+    .page-surface.slide-in-next { animation: enterNext 430ms var(--ease-book) both; }
+    .page-surface.slide-in-prev { animation: enterPrev 430ms var(--ease-book) both; }
+    @keyframes exitNext { to { opacity: 0; transform: translateX(-23%) scale(.975); filter: brightness(.94); } }
+    @keyframes exitPrev { to { opacity: 0; transform: translateX(23%) scale(.975); filter: brightness(.94); } }
+    @keyframes enterNext { from { opacity: 0; transform: translateX(30%) scale(.975); filter: brightness(.94); } to { opacity: 1; transform: none; filter: none; } }
+    @keyframes enterPrev { from { opacity: 0; transform: translateX(-30%) scale(.975); filter: brightness(.94); } to { opacity: 1; transform: none; filter: none; } }
+
+    .loading-state, .error-state {
+      position: absolute;
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      inset: 0;
+      padding: 2rem;
+      text-align: center;
+      color: var(--muted);
+      background: rgba(245, 241, 233, .42);
+      backdrop-filter: blur(7px);
+      transition: opacity 300ms ease, visibility 300ms ease;
+    }
+    .loading-state[hidden], .error-state[hidden] { display: none; }
+    .loader-mark { display: grid; gap: .8rem; justify-items: center; }
+    .loader-ring { width: 27px; height: 27px; border: 2px solid rgba(45,38,31,.16); border-top-color: var(--ink); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(1turn); } }
+    .error-state { color: #57493d; background: rgba(245, 240, 231, .92); }
+    .error-state p { max-width: 26rem; line-height: 1.55; margin: .6rem 0 0; }
+    .error-state code { padding: .15rem .3rem; color: #382f28; border-radius: .25rem; background: rgba(65,49,34,.1); }
+
+    .page-indicator {
+      position: fixed;
+      z-index: 40;
+      top: max(1rem, env(safe-area-inset-top)); left: max(1rem, env(safe-area-inset-left));
+      padding: .58rem .78rem;
+      color: #4e473f;
+      font-size: .78rem;
+      font-weight: 650;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--ui);
+      box-shadow: 0 5px 18px rgba(43, 34, 24, .07);
+      backdrop-filter: blur(15px) saturate(1.2);
+    }
+    .controls {
+      position: fixed;
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      gap: .45rem;
+      bottom: max(1.1rem, env(safe-area-inset-bottom)); left: 50%;
+      padding: .42rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--ui);
+      box-shadow: 0 10px 28px rgba(46, 35, 23, .12);
+      backdrop-filter: blur(17px) saturate(1.25);
+      transform: translateX(-50%);
+    }
+    .control-button {
+      display: grid;
+      place-items: center;
+      width: 2.65rem; height: 2.65rem;
+      padding: 0;
+      color: var(--ink);
+      cursor: pointer;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      transition: background 160ms ease, transform 160ms ease, opacity 160ms ease;
+    }
+    .control-button:hover { background: rgba(44,36,27,.09); }
+    .control-button:active { transform: scale(.91); }
+    .control-button:focus-visible, .thumbnail:focus-visible { outline: 2px solid #5b7180; outline-offset: 3px; }
+    .control-button:disabled { cursor: default; opacity: .33; }
+    .control-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+    .thumb-panel {
+      position: fixed;
+      z-index: 35;
+      top: 0; bottom: 0; right: 0;
+      width: min(19rem, 86vw);
+      padding: 5.1rem 1rem 1.25rem;
+      overflow: auto;
+      border-left: 1px solid rgba(58, 48, 36, .12);
+      background: rgba(245, 241, 233, .88);
+      box-shadow: -14px 0 38px rgba(46, 36, 25, .14);
+      backdrop-filter: blur(20px) saturate(1.2);
+      transform: translateX(105%);
+      transition: transform 330ms var(--ease-book);
+    }
+    .thumb-panel.is-open { transform: translateX(0); }
+    .thumb-heading { margin: 0 0 1rem; color: var(--muted); font-size: .72rem; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    .thumbnail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+    .thumbnail {
+      display: grid;
+      gap: .36rem;
+      min-width: 0;
+      padding: .38rem;
+      color: var(--muted);
+      font-size: .68rem;
+      text-align: left;
+      cursor: pointer;
+      border: 1px solid transparent;
+      border-radius: .45rem;
+      background: transparent;
+      transition: background 160ms ease, border-color 160ms ease;
+    }
+    .thumbnail:hover, .thumbnail.is-active { border-color: rgba(56,47,37,.18); background: rgba(255,255,255,.47); }
+    .thumbnail canvas, .thumb-placeholder {
+      display: block;
+      width: 100%;
+      aspect-ratio: var(--page-ratio) / 1;
+      border-radius: 2px;
+      background: var(--paper-edge);
+      box-shadow: 0 3px 8px rgba(47,37,26,.15);
+      object-fit: fill;
+    }
+    .thumb-placeholder { animation: breathe 1.2s ease-in-out infinite alternate; }
+    @keyframes breathe { to { opacity: .55; } }
+    .panel-scrim { position: fixed; z-index: 30; inset: 0; opacity: 0; pointer-events: none; background: rgba(30,25,20,.12); transition: opacity 250ms ease; }
+    .panel-scrim.is-visible { opacity: 1; pointer-events: auto; }
+
+    @media (max-width: 760px) {
+      .viewer { padding-top: 4rem; padding-bottom: 5.45rem; }
+      .book-stage { min-width: 220px; }
+      .control-button { width: 2.5rem; height: 2.5rem; }
+      .page-indicator { font-size: .7rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="reader" aria-label="Interactive magazine reader">
+    <div class="viewer" id="viewer">
+      <div class="book-scaler" id="bookScaler">
+        <section class="book-stage is-cover" id="bookStage" aria-live="polite" aria-label="Magazine pages">
+          <div class="page-slot page-left"><div class="page-surface is-empty" id="leftSurface"></div></div>
+          <div class="page-slot page-right"><div class="page-surface" id="rightSurface"></div></div>
+          <div class="book-spine" aria-hidden="true"></div>
+          <div class="flip-leaf" id="flipLeaf" aria-hidden="true">
+            <div class="leaf-face leaf-front"><div class="page-surface" id="leafFront"></div></div>
+            <div class="leaf-face leaf-back"><div class="page-surface" id="leafBack"></div></div>
+          </div>
+          <div class="loading-state" id="loadingState"><div class="loader-mark"><div class="loader-ring"></div><span>Opening magazine</span></div></div>
+          <div class="error-state" id="errorState" hidden><div><strong>Unable to open the magazine</strong><p id="errorMessage"></p></div></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="page-indicator" id="pageIndicator">Loading</div>
+    <nav class="controls" aria-label="Reader controls">
+      <button class="control-button" id="prevButton" type="button" aria-label="Previous pages" title="Previous (←)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7"/></svg>
+      </button>
+      <button class="control-button" id="modeButton" type="button" aria-label="Switch to single-page view" title="Change view (M)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="7" height="14" rx=".8"/><rect x="13" y="5" width="7" height="14" rx=".8"/></svg>
+      </button>
+      <button class="control-button" id="thumbButton" type="button" aria-label="Show page thumbnails" title="Thumbnails (T)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="4.5" width="6" height="6" rx=".5"/><rect x="13.5" y="4.5" width="6" height="6" rx=".5"/><rect x="4.5" y="13.5" width="6" height="6" rx=".5"/><rect x="13.5" y="13.5" width="6" height="6" rx=".5"/></svg>
+      </button>
+      <button class="control-button" id="nextButton" type="button" aria-label="Next pages" title="Next (→)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 5 7 7-7 7"/></svg>
+      </button>
+    </nav>
+
+    <div class="panel-scrim" id="panelScrim" aria-hidden="true"></div>
+    <aside class="thumb-panel" id="thumbPanel" aria-label="Page thumbnails" aria-hidden="true">
+      <p class="thumb-heading">All pages</p>
+      <div class="thumbnail-grid" id="thumbnailGrid"></div>
+    </aside>
+  </main>
+
+  <script type="module">
+    /* PDF.js 5.7.284 was the current stable release when this file was authored.
+       Keeping the core and worker on the same version prevents worker/API mismatches. */
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/build/pdf.min.mjs";
+
+    const PDF_URL = "magazine.pdf";
+    const PDFJS_VERSION = "5.7.284";
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.worker.min.mjs`;
+
+    const $ = (selector) => document.querySelector(selector);
+    const dom = {
+      viewer: $("#viewer"), bookScaler: $("#bookScaler"), bookStage: $("#bookStage"),
+      left: $("#leftSurface"), right: $("#rightSurface"),
+      leaf: $("#flipLeaf"), leafFront: $("#leafFront"), leafBack: $("#leafBack"),
+      loading: $("#loadingState"), error: $("#errorState"), errorMessage: $("#errorMessage"),
+      indicator: $("#pageIndicator"), prev: $("#prevButton"), next: $("#nextButton"), mode: $("#modeButton"),
+      thumbs: $("#thumbButton"), thumbPanel: $("#thumbPanel"), thumbGrid: $("#thumbnailGrid"), scrim: $("#panelScrim")
+    };
+
+    const state = {
+      pdf: null,
+      pages: 0,
+      currentPage: 1,
+      currentSpread: 0,
+      userMode: "double",
+      viewMode: "double",
+      isTurning: false,
+      surfaceTokens: new WeakMap(),
+      lastTap: 0,
+      pointerStart: null,
+      thumbnailObserver: null
+    };
+
+    /* Render cache stores high-DPI source canvases. Page surfaces receive a cheap bitmap copy,
+       so one cached canvas can safely be used by a page and the animated leaf at the same time. */
+    const pageCache = new Map();
+    const pagePromises = new Map();
+    const MAX_CACHE_ENTRIES = 28;
+    const audio = new Audio("flip.mp3");
+    audio.preload = "auto";
+    audio.volume = .22;
+
+    function isMobileViewport() { return window.matchMedia("(max-width: 760px)").matches; }
+    function activeMode() { return isMobileViewport() ? "single" : state.userMode; }
+    function pageRatio() { return window.innerWidth <= 760 ? .707 : .707; }
+    function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+    function nextFrame() { return new Promise(resolve => requestAnimationFrame(resolve)); }
+
+    function displayWidth(kind = "page") {
+      const rect = dom.bookStage.getBoundingClientRect();
+      if (kind === "thumb") return 118;
+      return Math.max(180, Math.round(state.viewMode === "single" ? rect.width : rect.width / 2));
+    }
+
+    function cacheKey(pageNumber, width, kind) {
+      const dpr = Math.min(window.devicePixelRatio || 1, 3);
+      return `${kind}:${pageNumber}:${Math.round(width)}:${dpr}`;
+    }
+
+    function touchCache(key, value) {
+      pageCache.delete(key);
+      pageCache.set(key, value);
+      while (pageCache.size > MAX_CACHE_ENTRIES) pageCache.delete(pageCache.keys().next().value);
+    }
+
+    function cloneCanvas(source) {
+      const clone = document.createElement("canvas");
+      clone.width = source.width;
+      clone.height = source.height;
+      clone.getContext("2d", { alpha: false }).drawImage(source, 0, 0);
+      return clone;
+    }
+
+    async function getRenderedCanvas(pageNumber, kind = "page") {
+      if (!pageNumber || pageNumber < 1 || pageNumber > state.pages) return null;
+      const width = displayWidth(kind);
+      const key = cacheKey(pageNumber, width, kind);
+      if (pageCache.has(key)) {
+        const cached = pageCache.get(key);
+        touchCache(key, cached);
+        return cached;
+      }
+      if (pagePromises.has(key)) return pagePromises.get(key);
+
+      const task = (async () => {
+        const pdfPage = await state.pdf.getPage(pageNumber);
+        const naturalViewport = pdfPage.getViewport({ scale: 1 });
+        const cssScale = width / naturalViewport.width;
+        const viewport = pdfPage.getViewport({ scale: cssScale });
+        const outputScale = Math.min(window.devicePixelRatio || 1, 3);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width * outputScale);
+        canvas.height = Math.ceil(viewport.height * outputScale);
+        const context = canvas.getContext("2d", { alpha: false });
+        await pdfPage.render({
+          canvasContext: context,
+          viewport,
+          transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
+          background: "#fffdf8"
+        }).promise;
+        touchCache(key, canvas);
+        return canvas;
+      })();
+      pagePromises.set(key, task);
+      try { return await task; }
+      finally { pagePromises.delete(key); }
+    }
+
+    async function mountPage(surface, pageNumber, kind = "page") {
+      const token = (state.surfaceTokens.get(surface) || 0) + 1;
+      state.surfaceTokens.set(surface, token);
+      surface.replaceChildren();
+      surface.classList.toggle("is-empty", !pageNumber);
+      if (!pageNumber) return;
+      const canvas = await getRenderedCanvas(pageNumber, kind);
+      if (state.surfaceTokens.get(surface) !== token) return;
+      const copy = cloneCanvas(canvas);
+      copy.setAttribute("aria-label", `Magazine page ${pageNumber}`);
+      surface.replaceChildren(copy);
+    }
+
+    function spreadFor(index) {
+      if (index === 0) return { index: 0, left: null, right: 1, cover: true };
+      const left = index * 2;
+      return {
+        index,
+        left: left <= state.pages ? left : null,
+        right: left + 1 <= state.pages ? left + 1 : null,
+        cover: false
+      };
+    }
+
+    function maxSpreadIndex() { return Math.ceil((state.pages - 1) / 2); }
+    function spreadForPage(pageNumber) { return pageNumber === 1 ? 0 : Math.ceil((pageNumber - 1) / 2); }
+    function currentSpreadData() { return spreadFor(state.currentSpread); }
+
+    function visiblePages(spread = currentSpreadData()) {
+      return [spread.left, spread.right].filter(Boolean);
+    }
+
+    async function renderDesktopStable() {
+      const spread = currentSpreadData();
+      dom.bookStage.classList.remove("is-single");
+      dom.bookStage.classList.toggle("is-cover", spread.cover);
+      await Promise.all([mountPage(dom.left, spread.left), mountPage(dom.right, spread.right)]);
+      updateUI();
+      preloadNearby();
+    }
+
+    async function renderSingle({ animate = false, direction = 1 } = {}) {
+      dom.bookStage.classList.remove("is-cover");
+      dom.bookStage.classList.add("is-single");
+      if (animate) {
+        dom.right.classList.remove("slide-in-next", "slide-in-prev");
+        dom.right.classList.add(direction > 0 ? "slide-out-next" : "slide-out-prev");
+        await wait(220);
+      }
+      await mountPage(dom.right, state.currentPage);
+      dom.right.classList.remove("slide-out-next", "slide-out-prev");
+      if (animate) {
+        dom.right.classList.add(direction > 0 ? "slide-in-next" : "slide-in-prev");
+        await wait(440);
+        dom.right.classList.remove("slide-in-next", "slide-in-prev");
+      }
+      updateUI();
+      preloadNearby();
+    }
+
+    function playFlipSound() {
+      try { audio.currentTime = 0; audio.play().catch(() => {}); } catch (_) { /* Sound remains optional. */ }
+    }
+
+    async function flipDesktop(targetIndex, direction) {
+      const from = currentSpreadData();
+      const to = spreadFor(targetIndex);
+      const frontPage = direction > 0 ? from.right : to.right;
+      const backPage = direction > 0 ? to.left : from.left;
+
+      // Preload the sides needed for the physical leaf before exposing the transition.
+      await Promise.all([
+        getRenderedCanvas(frontPage), getRenderedCanvas(backPage),
+        direction > 0 ? mountPage(dom.right, to.right) : mountPage(dom.left, to.left),
+        mountPage(dom.leafFront, frontPage), mountPage(dom.leafBack, backPage)
+      ]);
+
+      dom.leaf.className = "flip-leaf is-active";
+      if (direction < 0) dom.leaf.classList.add("is-on-left");
+      // A reflow makes the starting transform observable before the transition starts.
+      void dom.leaf.offsetWidth;
+      dom.leaf.classList.add("is-turning");
+      await nextFrame();
+      playFlipSound();
+      dom.leaf.classList.add(direction > 0 ? "turn-forward" : "turn-back");
+      await wait(705);
+      dom.leaf.className = "flip-leaf";
+      state.currentSpread = targetIndex;
+      state.currentPage = (to.left || to.right || 1);
+      await renderDesktopStable();
+    }
+
+    async function goNext() {
+      if (!state.pdf || state.isTurning) return;
+      state.isTurning = true;
+      if (state.viewMode === "single") {
+        if (state.currentPage < state.pages) {
+          state.currentPage += 1;
+          playFlipSound();
+          await renderSingle({ animate: true, direction: 1 });
+        }
+      } else if (state.currentSpread < maxSpreadIndex()) {
+        await flipDesktop(state.currentSpread + 1, 1);
+      }
+      state.isTurning = false;
+      updateUI();
+    }
+
+    async function goPrevious() {
+      if (!state.pdf || state.isTurning) return;
+      state.isTurning = true;
+      if (state.viewMode === "single") {
+        if (state.currentPage > 1) {
+          state.currentPage -= 1;
+          playFlipSound();
+          await renderSingle({ animate: true, direction: -1 });
+        }
+      } else if (state.currentSpread > 0) {
+        await flipDesktop(state.currentSpread - 1, -1);
+      }
+      state.isTurning = false;
+      updateUI();
+    }
+
+    async function goToPage(pageNumber) {
+      if (!state.pdf || state.isTurning || pageNumber < 1 || pageNumber > state.pages) return;
+      closeThumbnails();
+      if (state.viewMode === "single") {
+        const direction = pageNumber >= state.currentPage ? 1 : -1;
+        state.currentPage = pageNumber;
+        state.isTurning = true;
+        playFlipSound();
+        await renderSingle({ animate: true, direction });
+        state.isTurning = false;
+        return;
+      }
+      const target = spreadForPage(pageNumber);
+      if (target === state.currentSpread) return;
+      state.isTurning = true;
+      await flipDesktop(target, target > state.currentSpread ? 1 : -1);
+      state.isTurning = false;
+    }
+
+    function updateUI() {
+      if (!state.pdf) return;
+      const spread = currentSpreadData();
+      const pages = state.viewMode === "single" ? [state.currentPage] : visiblePages(spread);
+      const readingLabel = pages.length === 2 ? `Pages ${pages[0]}–${pages[1]}` : (spread.cover && state.viewMode === "double" ? "Cover · 1" : `Page ${pages[0]}`);
+      dom.indicator.textContent = `${readingLabel} / ${state.pages}`;
+      dom.prev.disabled = state.viewMode === "single" ? state.currentPage <= 1 : state.currentSpread <= 0;
+      dom.next.disabled = state.viewMode === "single" ? state.currentPage >= state.pages : state.currentSpread >= maxSpreadIndex();
+      const isSingle = state.viewMode === "single";
+      dom.mode.setAttribute("aria-label", isSingle ? "Switch to double-page view" : "Switch to single-page view");
+      dom.mode.title = isMobileViewport() ? "Single page is used on smaller screens" : (isSingle ? "Double-page view (M)" : "Single-page view (M)");
+      dom.mode.disabled = isMobileViewport();
+      document.querySelectorAll(".thumbnail").forEach(button => {
+        const p = Number(button.dataset.page);
+        button.classList.toggle("is-active", pages.includes(p));
+        button.setAttribute("aria-current", pages.includes(p) ? "page" : "false");
+      });
+    }
+
+    function preloadNearby() {
+      if (!state.pdf) return;
+      const candidates = new Set();
+      if (state.viewMode === "single") {
+        for (let p = state.currentPage - 2; p <= state.currentPage + 2; p += 1) candidates.add(p);
+      } else {
+        for (let s = state.currentSpread - 1; s <= state.currentSpread + 2; s += 1) {
+          if (s >= 0 && s <= maxSpreadIndex()) visiblePages(spreadFor(s)).forEach(p => candidates.add(p));
+        }
+      }
+      candidates.forEach(p => { if (p >= 1 && p <= state.pages) getRenderedCanvas(p).catch(() => {}); });
+    }
+
+    function makeThumbnails() {
+      const fragment = document.createDocumentFragment();
+      for (let page = 1; page <= state.pages; page += 1) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "thumbnail";
+        button.dataset.page = page;
+        button.setAttribute("aria-label", `Go to page ${page}`);
+        button.innerHTML = `<span class="thumb-placeholder" aria-hidden="true"></span><span>Page ${page}</span>`;
+        button.addEventListener("click", () => goToPage(page));
+        fragment.append(button);
+      }
+      dom.thumbGrid.replaceChildren(fragment);
+      state.thumbnailObserver?.disconnect();
+      state.thumbnailObserver = new IntersectionObserver(entries => {
+        entries.filter(entry => entry.isIntersecting).forEach(async entry => {
+          const button = entry.target;
+          state.thumbnailObserver.unobserve(button);
+          const canvas = await getRenderedCanvas(Number(button.dataset.page), "thumb");
+          const placeholder = button.querySelector(".thumb-placeholder");
+          if (canvas && placeholder) placeholder.replaceWith(cloneCanvas(canvas));
+        });
+      }, { root: dom.thumbPanel, rootMargin: "260px 0px" });
+      dom.thumbGrid.querySelectorAll(".thumbnail").forEach(button => state.thumbnailObserver.observe(button));
+    }
+
+    function openThumbnails() {
+      dom.thumbPanel.classList.add("is-open");
+      dom.thumbPanel.setAttribute("aria-hidden", "false");
+      dom.scrim.classList.add("is-visible");
+      dom.thumbs.setAttribute("aria-expanded", "true");
+    }
+    function closeThumbnails() {
+      dom.thumbPanel.classList.remove("is-open");
+      dom.thumbPanel.setAttribute("aria-hidden", "true");
+      dom.scrim.classList.remove("is-visible");
+      dom.thumbs.setAttribute("aria-expanded", "false");
+    }
+
+    async function setMode(mode, { animate = false } = {}) {
+      const nextMode = isMobileViewport() ? "single" : mode;
+      if (nextMode === state.viewMode && !animate) return;
+      state.viewMode = nextMode;
+      if (nextMode === "single") {
+        const spread = currentSpreadData();
+        state.currentPage = state.currentPage || spread.left || spread.right || 1;
+        await renderSingle({ animate: false });
+      } else {
+        state.currentSpread = spreadForPage(state.currentPage);
+        await renderDesktopStable();
+      }
+      updateUI();
+    }
+
+    function toggleMode() {
+      if (isMobileViewport()) return;
+      state.userMode = state.userMode === "double" ? "single" : "double";
+      setMode(state.userMode);
+    }
+
+    function showError(message) {
+      dom.loading.hidden = true;
+      dom.errorMessage.innerHTML = `${message}<br><small>Put <code>magazine.pdf</code> beside this HTML file and serve the folder over HTTP (for example, a local development server).</small>`;
+      dom.error.hidden = false;
+    }
+
+    async function initialize() {
+      try {
+        const loadingTask = pdfjsLib.getDocument({ url: PDF_URL, rangeChunkSize: 1 << 16 });
+        state.pdf = await loadingTask.promise;
+        state.pages = state.pdf.numPages;
+        if (!state.pages) throw new Error("The PDF has no pages.");
+        state.viewMode = activeMode();
+        state.currentPage = 1;
+        state.currentSpread = 0;
+        makeThumbnails();
+        if (state.viewMode === "single") await renderSingle();
+        else await renderDesktopStable();
+        dom.loading.hidden = true;
+      } catch (error) {
+        console.error("PDF loading failed", error);
+        showError("The local PDF could not be loaded.");
+      }
+    }
+
+    dom.prev.addEventListener("click", goPrevious);
+    dom.next.addEventListener("click", goNext);
+    dom.mode.addEventListener("click", toggleMode);
+    dom.thumbs.addEventListener("click", () => dom.thumbPanel.classList.contains("is-open") ? closeThumbnails() : openThumbnails());
+    dom.scrim.addEventListener("click", closeThumbnails);
+
+    window.addEventListener("keydown", event => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === "ArrowRight" || event.key === "PageDown") { event.preventDefault(); goNext(); }
+      if (event.key === "ArrowLeft" || event.key === "PageUp") { event.preventDefault(); goPrevious(); }
+      if (event.key.toLowerCase() === "m") toggleMode();
+      if (event.key.toLowerCase() === "t") dom.thumbPanel.classList.contains("is-open") ? closeThumbnails() : openThumbnails();
+      if (event.key === "Escape") { closeThumbnails(); dom.bookScaler.classList.remove("is-zoomed"); }
+    });
+
+    // Lightweight swipe recognizer; native vertical scrolling and pinch zoom remain available.
+    dom.bookStage.addEventListener("pointerdown", event => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      state.pointerStart = { x: event.clientX, y: event.clientY, time: performance.now() };
+    });
+    dom.bookStage.addEventListener("pointerup", event => {
+      if (!state.pointerStart) return;
+      const dx = event.clientX - state.pointerStart.x;
+      const dy = event.clientY - state.pointerStart.y;
+      const elapsed = performance.now() - state.pointerStart.time;
+      state.pointerStart = null;
+      if (Math.abs(dx) > 46 && Math.abs(dx) > Math.abs(dy) * 1.35 && elapsed < 700) dx < 0 ? goNext() : goPrevious();
+    });
+    dom.bookStage.addEventListener("pointercancel", () => { state.pointerStart = null; });
+    dom.bookStage.addEventListener("dblclick", event => { event.preventDefault(); dom.bookScaler.classList.toggle("is-zoomed"); });
+    dom.bookStage.addEventListener("touchend", event => {
+      // Safari may not emit dblclick reliably for a non-clickable surface.
+      if (event.touches.length) return;
+      const now = performance.now();
+      if (now - state.lastTap < 280) { dom.bookScaler.classList.toggle("is-zoomed"); state.lastTap = 0; }
+      else state.lastTap = now;
+    }, { passive: true });
+
+    let resizeTimer;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(async () => {
+        if (!state.pdf || state.isTurning) return;
+        const desired = activeMode();
+        if (desired !== state.viewMode) await setMode(desired);
+        else if (desired === "single") await renderSingle();
+        else await renderDesktopStable();
+      }, 180);
+    });
+
+    initialize();
+  </script>
+</body>
+</html>
