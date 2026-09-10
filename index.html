@@ -153,16 +153,15 @@
     .book-stage.is-single .page-left, .book-stage.is-single .book-spine { display: none; }
     .book-stage.is-single .page-right { left: 0; width: 100%; border-radius: 5px; }
     .book-stage.is-single .page-right::after { background: linear-gradient(90deg, rgba(35,23,12,.07), transparent 10%, transparent 92%, rgba(35,23,12,.045)); }
-    .book-stage.is-single .flip-leaf { display: none !important; }
-    /* Deliberately pronounced mobile paging: this stays smooth but is visible on small screens. */
-    .page-surface.slide-out-next { animation: exitNext 240ms ease-in both; }
-    .page-surface.slide-out-prev { animation: exitPrev 240ms ease-in both; }
-    .page-surface.slide-in-next { animation: enterNext 430ms var(--ease-book) both; }
-    .page-surface.slide-in-prev { animation: enterPrev 430ms var(--ease-book) both; }
-    @keyframes exitNext { to { opacity: 0; transform: translateX(-23%) scale(.975); filter: brightness(.94); } }
-    @keyframes exitPrev { to { opacity: 0; transform: translateX(23%) scale(.975); filter: brightness(.94); } }
-    @keyframes enterNext { from { opacity: 0; transform: translateX(30%) scale(.975); filter: brightness(.94); } to { opacity: 1; transform: none; filter: none; } }
-    @keyframes enterPrev { from { opacity: 0; transform: translateX(-30%) scale(.975); filter: brightness(.94); } to { opacity: 1; transform: none; filter: none; } }
+    /* A full-size leaf is reused in single-page mode for a physical, touch-friendly turn. */
+    .book-stage.is-single .flip-leaf { left: 0; width: 100%; display: none !important; border-radius: 5px; }
+    .book-stage.is-single .flip-leaf.is-active { display: block !important; }
+    .book-stage.is-single .leaf-front, .book-stage.is-single .leaf-back { border-radius: 5px; }
+    /* The other side of a mobile leaf is never part of the one-page view. Hiding it
+       prevents a duplicate of the incoming page appearing briefly beyond the spine. */
+    .book-stage.is-single .leaf-back { visibility: hidden; }
+    .book-stage.is-single .flip-leaf.is-turning { transition-duration: 560ms; }
+    .book-stage.is-single .leaf-front { box-shadow: 10px 4px 25px rgba(29, 21, 13, .24); }
 
     .loading-state, .error-state {
       position: absolute;
@@ -481,23 +480,46 @@
       preloadNearby();
     }
 
-    async function renderSingle({ animate = false, direction = 1 } = {}) {
+    async function renderSingle() {
       dom.bookStage.classList.remove("is-cover");
       dom.bookStage.classList.add("is-single");
-      if (animate) {
-        dom.right.classList.remove("slide-in-next", "slide-in-prev");
-        dom.right.classList.add(direction > 0 ? "slide-out-next" : "slide-out-prev");
-        await wait(220);
-      }
       await mountPage(dom.right, state.currentPage);
-      dom.right.classList.remove("slide-out-next", "slide-out-prev");
-      if (animate) {
-        dom.right.classList.add(direction > 0 ? "slide-in-next" : "slide-in-prev");
-        await wait(440);
-        dom.right.classList.remove("slide-in-next", "slide-in-prev");
-      }
       updateUI();
       preloadNearby();
+    }
+
+    async function flipSinglePage(targetPage, direction, originY = .5) {
+      const fromPage = state.currentPage;
+      const frontPage = direction > 0 ? fromPage : targetPage;
+      const backPage = direction > 0 ? targetPage : fromPage;
+      const pivot = Math.max(.07, Math.min(.93, Number(originY) || .5));
+      const cornerTilt = (pivot - .5) * 7;
+
+      // On a forward turn the next page is already beneath the folding leaf.
+      // On a backward turn the current page remains beneath until the old page folds back in.
+      await Promise.all([
+        direction > 0 ? mountPage(dom.right, targetPage) : Promise.resolve(),
+        mountPage(dom.leafFront, frontPage),
+        mountPage(dom.leafBack, backPage)
+      ]);
+
+      dom.leaf.className = "flip-leaf is-active";
+      // The touch height controls the hinge: a bottom-corner gesture pivots low,
+      // while a top-corner gesture pivots high. This gives single pages a book-like curl.
+      dom.leaf.style.transformOrigin = `0% ${pivot * 100}%`;
+      dom.leaf.style.transform = direction > 0 ? "rotateY(0deg)" : "rotateY(-180deg)";
+      void dom.leaf.offsetWidth;
+      dom.leaf.classList.add("is-turning");
+      await nextFrame();
+      dom.leaf.style.transform = direction > 0
+        ? `rotateY(-180deg) rotateZ(${-cornerTilt}deg)`
+        : "rotateY(0deg) rotateZ(0deg)";
+      await wait(575);
+      dom.leaf.className = "flip-leaf";
+      dom.leaf.style.transform = "";
+      dom.leaf.style.transformOrigin = "";
+      state.currentPage = targetPage;
+      await renderSingle();
     }
 
     function playFlipSound() {
@@ -532,14 +554,13 @@
       await renderDesktopStable();
     }
 
-    async function goNext() {
+    async function goNext(originY = .5) {
       if (!state.pdf || state.isTurning) return;
       state.isTurning = true;
       if (state.viewMode === "single") {
         if (state.currentPage < state.pages) {
-          state.currentPage += 1;
           playFlipSound();
-          await renderSingle({ animate: true, direction: 1 });
+          await flipSinglePage(state.currentPage + 1, 1, originY);
         }
       } else if (state.currentSpread < maxSpreadIndex()) {
         await flipDesktop(state.currentSpread + 1, 1);
@@ -548,14 +569,13 @@
       updateUI();
     }
 
-    async function goPrevious() {
+    async function goPrevious(originY = .5) {
       if (!state.pdf || state.isTurning) return;
       state.isTurning = true;
       if (state.viewMode === "single") {
         if (state.currentPage > 1) {
-          state.currentPage -= 1;
           playFlipSound();
-          await renderSingle({ animate: true, direction: -1 });
+          await flipSinglePage(state.currentPage - 1, -1, originY);
         }
       } else if (state.currentSpread > 0) {
         await flipDesktop(state.currentSpread - 1, -1);
@@ -569,10 +589,9 @@
       closeThumbnails();
       if (state.viewMode === "single") {
         const direction = pageNumber >= state.currentPage ? 1 : -1;
-        state.currentPage = pageNumber;
         state.isTurning = true;
         playFlipSound();
-        await renderSingle({ animate: true, direction });
+        await flipSinglePage(pageNumber, direction);
         state.isTurning = false;
         return;
       }
@@ -700,8 +719,8 @@
       }
     }
 
-    dom.prev.addEventListener("click", goPrevious);
-    dom.next.addEventListener("click", goNext);
+    dom.prev.addEventListener("click", () => goPrevious());
+    dom.next.addEventListener("click", () => goNext());
     dom.mode.addEventListener("click", toggleMode);
     dom.thumbs.addEventListener("click", () => dom.thumbPanel.classList.contains("is-open") ? closeThumbnails() : openThumbnails());
     dom.scrim.addEventListener("click", closeThumbnails);
@@ -722,11 +741,16 @@
     });
     dom.bookStage.addEventListener("pointerup", event => {
       if (!state.pointerStart) return;
-      const dx = event.clientX - state.pointerStart.x;
-      const dy = event.clientY - state.pointerStart.y;
-      const elapsed = performance.now() - state.pointerStart.time;
+      const start = state.pointerStart;
+      const dx = event.clientX - start.x;
+      const dy = event.clientY - start.y;
+      const elapsed = performance.now() - start.time;
       state.pointerStart = null;
-      if (Math.abs(dx) > 46 && Math.abs(dx) > Math.abs(dy) * 1.35 && elapsed < 700) dx < 0 ? goNext() : goPrevious();
+      if (Math.abs(dx) > 46 && Math.abs(dx) > Math.abs(dy) * 1.35 && elapsed < 700) {
+        const bounds = dom.bookStage.getBoundingClientRect();
+        const originY = (start.y - bounds.top) / bounds.height;
+        dx < 0 ? goNext(originY) : goPrevious(originY);
+      }
     });
     dom.bookStage.addEventListener("pointercancel", () => { state.pointerStart = null; });
     dom.bookStage.addEventListener("dblclick", event => { event.preventDefault(); dom.bookScaler.classList.toggle("is-zoomed"); });
